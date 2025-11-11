@@ -93,6 +93,20 @@ static void handleSave() {
   ESP.restart();
 }
 
+static void handleFactoryReset() {
+  Serial.println("Factory Reset: Lösche persistente Daten...");
+  server.send(200, "text/plain", "Factory Reset wird ausgef&uuml;hrt, reboot...");
+  // EEPROM vollständig zurücksetzen
+  for (int i = 0; i < EEPROM_SIZE; ++i) {
+    EEPROM.write(i, 0xFF);
+  }
+#if defined(ESP8266) || defined(ESP32)
+  EEPROM.commit();
+#endif
+  delay(800);
+  ESP.restart();
+}
+
 static void startAccessPoint() {
   const char* ap_ssid = "LeviCube-Setup";
 
@@ -104,6 +118,7 @@ static void startAccessPoint() {
 
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
+  server.on("/api/factoryReset", handleFactoryReset);
 
   server.on("/generate_204", [](){ server.send(204, "text/plain", ""); });
   server.on("/hotspot-detect.html", [](){ handleRoot(); });
@@ -122,6 +137,8 @@ static void startStationServices() {
   server.on("/api", [](){
     server.send(200, "text/plain", "OK");
   });
+  // factory reset auch im Station-Modus verfügbar
+  server.on("/api/factoryReset", handleFactoryReset);
   // optional: keep other handlers minimal
   server.begin();
   Serial.println("Webserver im Station-Modus gestartet.");
