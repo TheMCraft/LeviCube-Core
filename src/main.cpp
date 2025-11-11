@@ -76,11 +76,24 @@ static IPAddress apIP(192,168,4,1);
 
 static void handleRoot() {
   server.send(200, "text/html",
-  "<html><body><form method='POST' action='/save'>"
+  "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+  "<style>"
+  "html,body{height:100%;margin:0}body{display:flex;align-items:center;justify-content:center;"
+  "background:linear-gradient(135deg,#36CAFF11,#E566FF11);font-family:Arial,Helvetica,sans-serif}"
+  ".card{background:#fff;padding:24px;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,0.12);width:360px;max-width:90%}"
+  "h1{margin:0 0 12px;font-size:20px;color:#36CAFF;text-align:center}"
+  "input{width:100%;padding:10px;border:1px solid #e6e6e6;border-radius:8px;margin:8px 0;box-sizing:border-box}"
+  "button{width:100%;padding:12px;border:none;border-radius:8px;background:linear-gradient(90deg,#36CAFF,#E566FF);color:#fff;font-weight:600;cursor:pointer}"
+  "button:active{opacity:0.95}"
+  "</style></head><body>"
+  "<div class='card'>"
+  "<h1>WLAN einrichten</h1>"
+  "<form method='POST' action='/save'>"
   "<input name='ssid' placeholder='WLAN SSID'><br>"
   "<input name='pass' placeholder='WLAN Passwort' type='password'><br><br>"
   "<button type='submit'>Speichern</button>"
-  "</form></body></html>");
+  "</form></div></body></html>"
+  );
 }
 
 static void handleSave() {
