@@ -57,15 +57,19 @@ String persistRead(const String& key) {
 }
 
 void setup() {
-  Serial.begin(115200);
   initPersistent();
-
-  // kurzes Beispiel
-  persistSave("name", "LeviCube");
-  String val = persistRead("name");
-  Serial.println(val);
+  Serial.begin(115200);
+  while (!Serial) { }
+  Serial.println("Gib den Namen ein:");
 }
 
 void loop() {
-  // nichts
+  if (Serial.available()) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+    persistSave("name", input);
+  }
+    String val = persistRead("name");
+    Serial.print("Gespeichert: ");
+    Serial.println(val);
 }
