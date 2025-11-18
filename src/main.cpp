@@ -13,6 +13,8 @@
 #endif
 
 const int EEPROM_SIZE = 512;
+// Software-Version, anpassen bei neuen Releases
+const char* SOFTWARE_VERSION = "v1.2.2";
 
 // Boot button / factory reset settings
 const int BOOT_BUTTON_PIN = 0; // change if your board uses a different pin
@@ -266,6 +268,7 @@ static void handleApiHealth() {
   json += "\"rssi_dbm\":" + String(rssi) + ",";
   json += "\"ap_clients\":" + String(apClients) + ",";
   json += "\"mac\":\"" + mac + "\",";
+  json += "\"software_version\":\"" + String(SOFTWARE_VERSION) + "\",";
   json += "\"free_heap\":" + String(freeHeap);
   if (heapFrag >= 0) json += ",\"heap_frag_percent\":" + String(heapFrag);
   json += "}";
