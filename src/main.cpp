@@ -4,10 +4,12 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <DNSServer.h>
+#include <WiFiUdp.h>
 #elif defined(ESP32)
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <WiFiUdp.h>
 #endif
 
 const int EEPROM_SIZE = 512;
@@ -99,6 +101,19 @@ static WebServer server(80);
 static DNSServer dnsServer;
 const byte DNS_PORT = 53;
 static IPAddress apIP(192,168,4,1);
+
+// UDP discovery
+static WiFiUDP udp;
+const unsigned int UDP_DISCOVERY_PORT = 4267;
+
+static void startUDPListener() {
+  if (udp.begin(UDP_DISCOVERY_PORT)) {
+    Serial.print("UDP discovery listener started on port ");
+    Serial.println(UDP_DISCOVERY_PORT);
+  } else {
+    Serial.println("UDP discovery listener failed to start");
+  }
+}
 
 // Boot button runtime state
 static bool _lastButtonState = true;
@@ -207,6 +222,57 @@ static void performFactoryResetImmediate() {
   ESP.restart();
 }
 
+// API: health check
+static void handleApiHealth() {
+  String ip = apModeActive ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+  String mac = "";
+#if defined(ESP8266) || defined(ESP32)
+  mac = WiFi.macAddress();
+#endif
+  unsigned long uptime = millis() / 1000;
+  int freeHeap = 0;
+  int heapFrag = -1;
+#if defined(ESP8266) || defined(ESP32)
+  freeHeap = ESP.getFreeHeap();
+  #if defined(ESP8266)
+    heapFrag = ESP.getHeapFragmentation();
+  #endif
+#endif
+
+  bool connected = false;
+  String currentSsid = "";
+  int rssi = 0;
+  if (WiFi.status() == WL_CONNECTED) {
+    connected = true;
+    currentSsid = WiFi.SSID();
+    rssi = WiFi.RSSI();
+  }
+
+  int apClients = 0;
+#if defined(ESP8266)
+  apClients = WiFi.softAPgetStationNum();
+#elif defined(ESP32)
+  // On ESP32 the same API is available
+  apClients = WiFi.softAPgetStationNum();
+#endif
+
+  String json = "{";
+  json += "\"status\":\"ok\",";
+  json += "\"uptime_s\":" + String(uptime) + ",";
+  json += "\"ap_mode\":" + String(apModeActive ? "true" : "false") + ",";
+  json += "\"connected\":" + String(connected ? "true" : "false") + ",";
+  json += "\"ip\":\"" + ip + "\",";
+  json += "\"ssid\":\"" + currentSsid + "\",";
+  json += "\"rssi_dbm\":" + String(rssi) + ",";
+  json += "\"ap_clients\":" + String(apClients) + ",";
+  json += "\"mac\":\"" + mac + "\",";
+  json += "\"free_heap\":" + String(freeHeap);
+  if (heapFrag >= 0) json += ",\"heap_frag_percent\":" + String(heapFrag);
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
 static void startAccessPoint() {
   const char* ap_ssid = "LeviCube-Setup";
 
@@ -218,10 +284,13 @@ static void startAccessPoint() {
   WiFi.softAP(ap_ssid);
 
   dnsServer.start(DNS_PORT, "*", apIP);
+  // start UDP discovery listener so mobile app can find device
+  startUDPListener();
 
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
   server.on("/api/factoryReset", handleFactoryReset);
+  server.on("/api/health", handleApiHealth);
 
   server.on("/generate_204", [](){ server.send(204, "text/plain", ""); });
   server.on("/hotspot-detect.html", [](){ handleRoot(); });
@@ -242,8 +311,11 @@ static void startStationServices() {
   });
   // factory reset auch im Station-Modus verfügbar
   server.on("/api/factoryReset", handleFactoryReset);
+  server.on("/api/health", handleApiHealth);
   // optional: keep other handlers minimal
   server.begin();
+  // start UDP discovery listener in station mode as well
+  startUDPListener();
   Serial.println("Webserver im Station-Modus gestartet.");
   Serial.print("Station IP: ");
   Serial.println(WiFi.localIP());
@@ -337,6 +409,21 @@ void loop() {
   }
   if (apModeActive) {
     dnsServer.processNextRequest();
+  }
+  // UDP discovery responder: check for incoming packets and reply with our IP
+  int packetSize = udp.parsePacket();
+  if (packetSize > 0) {
+    char incoming[256];
+    int len = udp.read(incoming, 255);
+    if (len > 0) incoming[len] = 0;
+    IPAddress remote = udp.remoteIP();
+    unsigned int rport = udp.remotePort();
+    String replyIP = apModeActive ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+    Serial.print("UDP discovery packet from "); Serial.print(remote); Serial.print(":"); Serial.println(rport);
+    Serial.print("Replying with IP: "); Serial.println(replyIP);
+    udp.beginPacket(remote, rport);
+    udp.print(replyIP);
+    udp.endPacket();
   }
   // Webserver-Client immer bedienen (AP oder STA)
   server.handleClient();
