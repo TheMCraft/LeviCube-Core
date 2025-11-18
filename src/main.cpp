@@ -12,10 +12,36 @@
 
 const int EEPROM_SIZE = 512;
 
+// Boot button / factory reset settings
+const int BOOT_BUTTON_PIN = 0; // change if your board uses a different pin
+const unsigned long BOOT_BUTTON_DEBOUNCE_MS = 50;
+const unsigned long BOOT_BUTTON_WINDOW_MS = 5000; // time window to count presses
+const int BOOT_BUTTON_REQUIRED = 5; // required presses to trigger factory reset
+
+
 void initPersistent() {
 #if defined(ESP8266) || defined(ESP32)
   EEPROM.begin(EEPROM_SIZE);
 #endif
+}
+
+// Helper: parse dotted IP string to IPAddress (returns 0.0.0.0 on failure)
+static IPAddress parseIP(const String& s) {
+  int parts[4] = {0,0,0,0};
+  int idx = 0;
+  String cur = "";
+  for (unsigned int i = 0; i <= s.length(); ++i) {
+    if (i == s.length() || s[i] == '.') {
+      if (cur.length() > 0 && idx < 4) {
+        parts[idx++] = cur.toInt();
+      }
+      cur = "";
+    } else {
+      cur += s[i];
+    }
+  }
+  if (idx < 4) return IPAddress(0,0,0,0);
+  return IPAddress(parts[0], parts[1], parts[2], parts[3]);
 }
 
 bool persistSave(const String& key, const String& value) {
@@ -74,7 +100,40 @@ static DNSServer dnsServer;
 const byte DNS_PORT = 53;
 static IPAddress apIP(192,168,4,1);
 
+// Boot button runtime state
+static bool _lastButtonState = true;
+static unsigned long _lastButtonChange = 0;
+static bool _lastPressedHandled = false;
+static int _bootPressCount = 0;
+static unsigned long _firstBootPressTime = 0;
+
 static void handleRoot() {
+  // Scan nach Netzwerken (blockierend) und Duplikate filtern
+  String current = persistRead("wifi-ssid");
+  int n = WiFi.scanNetworks();
+  String options = "";
+  for (int i = 0; i < n; ++i) {
+    String s = WiFi.SSID(i);
+    if (s.length() == 0) continue;
+    bool dup = false;
+    // nur gegenüber früheren Einträgen prüfen — erstes Vorkommen behalten
+    for (int j = 0; j < i; ++j) {
+      if (WiFi.SSID(j) == s) { dup = true; break; }
+    }
+    if (dup) continue;
+    options += "<option value='" + s + "'";
+    if (s == current) options += " selected";
+    options += ">" + s + "</option>";
+  }
+  if (options.length() == 0) {
+    options = "<option value='' disabled selected>Keine Netzwerke gefunden</option>";
+  }
+  // statische IP-Vorgaben aus Persistent
+  String useStatic = persistRead("wifi-static");
+  String ipVal = persistRead("wifi-ip");
+  String gwVal = persistRead("wifi-gateway");
+  String nmVal = persistRead("wifi-netmask");
+
   server.send(200, "text/html",
   "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
   "<style>"
@@ -82,15 +141,19 @@ static void handleRoot() {
   "background:linear-gradient(135deg,#36CAFF11,#E566FF11);font-family:Arial,Helvetica,sans-serif}"
   ".card{background:#fff;padding:24px;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,0.12);width:360px;max-width:90%}"
   "h1{margin:0 0 12px;font-size:20px;color:#36CAFF;text-align:center}"
-  "input{width:100%;padding:10px;border:1px solid #e6e6e6;border-radius:8px;margin:8px 0;box-sizing:border-box}"
+  "select,input{width:100%;padding:10px;border:1px solid #e6e6e6;border-radius:8px;margin:8px 0;box-sizing:border-box}"
   "button{width:100%;padding:12px;border:none;border-radius:8px;background:linear-gradient(90deg,#36CAFF,#E566FF);color:#fff;font-weight:600;cursor:pointer}"
   "button:active{opacity:0.95}"
   "</style></head><body>"
   "<div class='card'>"
   "<h1>WLAN einrichten</h1>"
   "<form method='POST' action='/save'>"
-  "<input name='ssid' placeholder='WLAN SSID'><br>"
-  "<input name='pass' placeholder='WLAN Passwort' type='password'><br><br>"
+  "<select name='ssid'>" + options + "</select><br>"
+  "<input name='pass' placeholder='WLAN Passwort' type='password'><br>"
+  "<label style='display:block;margin-top:8px'><input type='checkbox' name='use_static'" + (useStatic=="1"?" checked":"") + "> Statische IP verwenden</label>"
+  "<input name='ip' placeholder='IP (z.B. 192.168.1.50)' value='" + ipVal + "'><br>"
+  "<input name='gateway' placeholder='Gateway (z.B. 192.168.1.1)' value='" + gwVal + "'><br>"
+  "<input name='netmask' placeholder='Netzmaske (z.B. 255.255.255.0)' value='" + nmVal + "'><br><br>"
   "<button type='submit'>Speichern</button>"
   "</form></div></body></html>"
   );
@@ -101,6 +164,17 @@ static void handleSave() {
   String p = server.arg("pass");
   persistSave("wifi-ssid", s);
   persistSave("wifi-password", p);
+
+  // Static IP fields
+  String useStatic = server.hasArg("use_static") ? server.arg("use_static") : String();
+  if (useStatic.length() > 0) persistSave("wifi-static", "1"); else persistSave("wifi-static", "0");
+  String ip = server.arg("ip");
+  String gw = server.arg("gateway");
+  String nm = server.arg("netmask");
+  persistSave("wifi-ip", ip);
+  persistSave("wifi-gateway", gw);
+  persistSave("wifi-netmask", nm);
+
   server.send(200, "text/plain", "OK, reboot...");
   delay(800);
   ESP.restart();
@@ -109,7 +183,20 @@ static void handleSave() {
 static void handleFactoryReset() {
   Serial.println("Factory Reset: Lösche persistente Daten...");
   server.send(200, "text/plain", "Factory Reset wird ausgef&uuml;hrt, reboot...");
-  // EEPROM vollständig zurücksetzen
+  // perform immediate reset (will reboot)
+  for (int i = 0; i < EEPROM_SIZE; ++i) {
+    EEPROM.write(i, 0xFF);
+  }
+#if defined(ESP8266) || defined(ESP32)
+  EEPROM.commit();
+#endif
+  delay(800);
+  ESP.restart();
+}
+
+// Shortcut to perform factory reset without HTTP response
+static void performFactoryResetImmediate() {
+  Serial.println("Factory Reset: Lösche persistente Daten (button)...");
   for (int i = 0; i < EEPROM_SIZE; ++i) {
     EEPROM.write(i, 0xFF);
   }
@@ -123,7 +210,10 @@ static void handleFactoryReset() {
 static void startAccessPoint() {
   const char* ap_ssid = "LeviCube-Setup";
 
-  WiFi.mode(WIFI_AP);
+  Serial.println("Starte Access Point (AP+STA)...");
+  // kombinierten Modus aktivieren, damit SSID-Scan im AP-Betrieb möglich ist
+  WiFi.mode(WIFI_AP_STA);
+  delay(100);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255,255,255,0));
   WiFi.softAP(ap_ssid);
 
@@ -164,6 +254,20 @@ static bool tryConnectWithTimeout(const String& ssid, const String& pass, unsign
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true);
   delay(100);
+  // If a static IP is configured, apply it before connecting
+  String useStatic = persistRead("wifi-static");
+  if (useStatic == "1") {
+    String ip = persistRead("wifi-ip");
+    String gw = persistRead("wifi-gateway");
+    String nm = persistRead("wifi-netmask");
+    IPAddress lip = parseIP(ip);
+    IPAddress lgw = parseIP(gw);
+    IPAddress lnm = parseIP(nm);
+    if (lip != IPAddress(0,0,0,0) && lgw != IPAddress(0,0,0,0) && lnm != IPAddress(0,0,0,0)) {
+      WiFi.config(lip, lgw, lnm);
+      Serial.print("Benutze statische IP: "); Serial.println(lip);
+    }
+  }
   WiFi.begin(ssid.c_str(), pass.c_str());
   unsigned long start = millis();
   while (millis() - start < timeoutMs) {
@@ -201,10 +305,36 @@ void setup() {
   initPersistent();
   Serial.begin(115200);
   delay(100);
+  // Boot button input
+  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
   connectWiFiWithFallback();
 }
 
 void loop() {
+  // Boot button handling: detect quick successive presses to trigger factory reset
+  bool state = digitalRead(BOOT_BUTTON_PIN);
+  unsigned long now = millis();
+  if (state != _lastButtonState) {
+    _lastButtonChange = now;
+    _lastButtonState = state;
+  }
+  // pressed when LOW (INPUT_PULLUP)
+  if (!state && (now - _lastButtonChange) > BOOT_BUTTON_DEBOUNCE_MS && !_lastPressedHandled) {
+    // first press in sequence
+    if (_firstBootPressTime == 0 || (now - _firstBootPressTime) > BOOT_BUTTON_WINDOW_MS) {
+      _firstBootPressTime = now;
+      _bootPressCount = 0;
+    }
+    _bootPressCount++;
+    _lastPressedHandled = true;
+    Serial.print("Boot button press count: "); Serial.println(_bootPressCount);
+    if (_bootPressCount >= BOOT_BUTTON_REQUIRED) {
+      performFactoryResetImmediate();
+    }
+  }
+  if (state && _lastPressedHandled) {
+    _lastPressedHandled = false; // release
+  }
   if (apModeActive) {
     dnsServer.processNextRequest();
   }
